@@ -37,11 +37,11 @@ int isIO_Happen(int time);
 
 int by_PID, by_priority, by_arrival_time, by_remain_burst_time, nonpreemtive, preemtive_RR, preemtive_SJF, preemtive_Priority;
 Process *running;
-Queue *process_queue, *job_queue, *ready_queue, *waiting_queue, *terminated_queue, *sort_queue;
+Queue *process_queue, *job_queue, *ready_queue, *waiting_queue, *terminated_queue, *preready_queue;
 Queue *result_FCFS, *result_SJF, *result_priority, *result_RR, *result_preemptive_SJF, *result_preemptive_priority;
 History *history_FCFS, *history_SJF, *history_priority, *history_RR, *history_preemptive_SJF, *history_preemptive_priority;
 void Config();
-Queue *Save_And_Backup_Queue();
+Queue *Save_And_Reset_Queue();
 
 void Update_Process_Time();
 void Update_Process_State(int time, int type, int sort_by);
@@ -137,6 +137,8 @@ Process *Pop_Queue(Queue *queue){
         queue->head->next = node->next;
         queue->cnt_node--;
         return process;
+    }else{
+        return NULL;
     }
 }
 
@@ -180,7 +182,7 @@ void Sort_Queue(Queue *queue, int type){
                     temp = node->next->process;
                     node->next->process = node->process;
                     node->process = temp;
-                }
+                }   
             }
         }
     }else if(type == by_priority){
@@ -345,10 +347,10 @@ void Config(){
     ready_queue = Create_Queue();
     waiting_queue = Create_Queue();
     terminated_queue = Create_Queue();
-    sort_queue = Create_Queue();
+    preready_queue = Create_Queue();
 }
 
-Queue *Save_And_Backup_Queue(){
+Queue *Save_And_Reset_Queue(){
     Queue *queue = Copy_Queue(terminated_queue);
     Sort_Queue(queue, by_PID);
     Empty_Queue(terminated_queue);
@@ -389,60 +391,48 @@ void Update_Process_State(int time, int type, int sort_by){
         running = NULL;
     }
 
-    int is_running_preemtive = 0;
-    int record_PID_running = 0;
-
-    if((type == preemtive_RR) && (running != NULL) && (running->current_burst_time == limit->quantum)){
-        running->burst_time += running->current_burst_time;
-        running->current_burst_time = 0;
-        Push_Queue(sort_queue, running);
-        running = NULL;
-    }else if(((type == preemtive_SJF)||(type == preemtive_Priority)) && (running != NULL)){
-        is_running_preemtive = 1;
-        record_PID_running = running->PID;
-        running->burst_time += running->current_burst_time;
-        running->current_burst_time = 0;
-        Push_Queue(sort_queue, running);
-        running = NULL;
-    }else if((running != NULL) && (isIO_Happen(time))){
+    if((running != NULL) && (isIO_Happen(time))){
         // if there is a running process and I/O is happened, then push running process to waiting queue
         running->burst_time += running->current_burst_time;
         running->current_burst_time = 0;
-        Push_Queue(waiting_queue, Copy_Process(running));
+        Push_Queue(waiting_queue, running);
+        running = NULL;
+    }
+
+    if((running != NULL) && (((type == preemtive_RR) && (running->current_burst_time == limit->quantum)) 
+    || (type == preemtive_SJF) || (type == preemtive_Priority))){
+        running->burst_time += running->current_burst_time;
+        running->current_burst_time = 0;
+        Push_Queue(preready_queue, running);
         running = NULL;
     }
 
     Node *ptr_node;
     int cnt;
 
-    // if some processes arrive, then copy them to sort queue
+    // if some processes arrive, then copy them to preready queue
     ptr_node = job_queue->head;
-    for(int i=0; i<job_queue->cnt_node; i++){
-        ptr_node = ptr_node->next;
-        if(ptr_node->process->arrival_time == time){
-            Push_Queue(sort_queue, Copy_Process(ptr_node->process));
+    while(ptr_node->next!=NULL){
+        if(ptr_node->next->process->arrival_time == time){
+            Push_Queue(preready_queue, ptr_node->next->process);
+            ptr_node->next = ptr_node->next->next;
+            job_queue->cnt_node -= 1;
+        }else{
+            ptr_node = ptr_node->next;
         }
     }
 
-    // if some processes finish waiting, then push them to sort queue
+    // if some processes finish waiting, then push them to preready queue
     ptr_node = waiting_queue->head;
-    cnt = 0;
-    for(int i=0; i<waiting_queue->cnt_node; i++){
+    while(ptr_node->next!=NULL){
         if(ptr_node->next->process->current_waiting_time == ptr_node->next->process->IO_burst_time){
             ptr_node->next->process->waiting_time += ptr_node->next->process->current_waiting_time;
             ptr_node->next->process->current_waiting_time = 0;
-            Push_Queue(sort_queue, ptr_node->next->process);
+            Push_Queue(preready_queue, ptr_node->next->process);
             ptr_node->next = ptr_node->next->next;
-            cnt++;
-        }
-        ptr_node = ptr_node->next;
-    }
-    waiting_queue->cnt_node -= cnt;
-
-    if((is_running_preemtive) && (isIO_Happen(time))){
-        Update_Ready_Queue(sort_by);
-        if(ready_queue->head->next->process->PID == record_PID_running){
-            Push_Queue(waiting_queue, Pop_Queue(ready_queue));
+            waiting_queue->cnt_node -= 1;
+        }else{
+            ptr_node = ptr_node->next;
         }
     }
 }
@@ -450,23 +440,21 @@ void Update_Process_State(int time, int type, int sort_by){
 void Update_Ready_Queue(int sort_by){
     // After gathering processes(which arrive or finish waiting) in sort process, Sort them by priority and Push to ready queue
     if(sort_by == by_priority){
-        while(sort_queue->cnt_node > 0){
-            Push_Queue(ready_queue, Pop_Queue(sort_queue));
+        while(preready_queue->cnt_node > 0){
+            Push_Queue(ready_queue, Pop_Queue(preready_queue));
         }
         Sort_Queue(ready_queue, by_arrival_time);
         Sort_Queue(ready_queue, by_priority);
     }else if(sort_by == by_arrival_time){
-        Sort_Queue(sort_queue, by_priority);
-        Sort_Queue(sort_queue, by_arrival_time);
-        while(sort_queue->cnt_node > 0){
-            Push_Queue(ready_queue, Pop_Queue(sort_queue));
+        Sort_Queue(preready_queue, by_arrival_time);
+        while(preready_queue->cnt_node > 0){
+            Push_Queue(ready_queue, Pop_Queue(preready_queue));
         }
     }else if(sort_by == by_remain_burst_time){
-        while(sort_queue->cnt_node > 0){
-            Push_Queue(ready_queue, Pop_Queue(sort_queue));
+        while(preready_queue->cnt_node > 0){
+            Push_Queue(ready_queue, Pop_Queue(preready_queue));
         }
         Sort_Queue(ready_queue, by_arrival_time);
-        Sort_Queue(ready_queue, by_priority);
         Sort_Queue(ready_queue, by_remain_burst_time);
     }
 }
@@ -483,10 +471,9 @@ void Schedule(int type, int sort_by, History *history){
     running = NULL;
     Node *ptr_node;
     Process *ptr_process;
-    Sort_Queue(job_queue, by_priority);
-    while(terminated_queue->cnt_node != job_queue->cnt_node){
+    while(terminated_queue->cnt_node != process_queue->cnt_node){
         time++;
-        Update_Process_Time();
+        Update_Process_Time();      // running, ready_queue, waiting_queue의 time ++
         Update_Process_State(time, type, sort_by);
         Update_Ready_Queue(sort_by);
         Update_Running();
@@ -496,32 +483,32 @@ void Schedule(int type, int sort_by, History *history){
 
 void FCFS(){
     Schedule(nonpreemtive, by_arrival_time, history_FCFS);
-    result_FCFS = Save_And_Backup_Queue();
+    result_FCFS = Save_And_Reset_Queue();
 }
 
 void SJF(){
     Schedule(nonpreemtive, by_remain_burst_time, history_SJF);
-    result_SJF = Save_And_Backup_Queue();
+    result_SJF = Save_And_Reset_Queue();
 }
 
 void Priority(){
     Schedule(nonpreemtive, by_priority, history_priority);
-    result_priority = Save_And_Backup_Queue();
+    result_priority = Save_And_Reset_Queue();
 }
 
 void RR(){
     Schedule(preemtive_RR, by_arrival_time, history_RR);
-    result_RR = Save_And_Backup_Queue();
+    result_RR = Save_And_Reset_Queue();
 }
 
 void Preemtive_SJF(){
     Schedule(preemtive_SJF, by_remain_burst_time, history_preemptive_SJF);
-    result_preemptive_SJF = Save_And_Backup_Queue();
+    result_preemptive_SJF = Save_And_Reset_Queue();
 }
 
 void Preemtive_Priority(){
     Schedule(preemtive_Priority, by_priority, history_preemptive_priority);
-    result_preemptive_priority = Save_And_Backup_Queue();
+    result_preemptive_priority = Save_And_Reset_Queue();
 }
 
 void Show(){
@@ -536,9 +523,9 @@ void Show(){
 }
 
 void Show_Process(){
-    Node *node = job_queue->head;
+    Node *node = process_queue->head;
     Process *p;
-    for(int i=0; i<job_queue->cnt_node; i++){
+    for(int i=0; i<process_queue->cnt_node; i++){
         node = node->next;
         p = node->process;
         printf(" PID : %d, CPU_burst : %d, IO_burst = %d, arrvial : %d, priority : %d\n", p->PID, p->CPU_burst_time, p->IO_burst_time, p->arrival_time, p->priority);
@@ -601,7 +588,7 @@ void Show_Result(){
     char schedule_type[6][20] = {"FCFS", "SJF", "Priority", "RR", "Preemptive SJF", "Preemptive Priority"};
     Queue *queue;
     Node *node;
-    char avg_turnaround_time[6][6], avg_waiting_time[6][6];
+    char avg_turnaround_time[6][7], avg_waiting_time[6][7];
     int sum_turnaround_time, sum_waiting_time;
     for(int i=0; i<6; i++){
         switch(i){
